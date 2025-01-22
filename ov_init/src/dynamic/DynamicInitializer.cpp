@@ -1,3 +1,4 @@
+
 /*
  * OpenVINS: An Open Platform for Visual-Inertial Research
  * Copyright (C) 2018-2023 Patrick Geneva
@@ -37,6 +38,18 @@
 #include "utils/quat_ops.h"
 #include "utils/sensor_data.h"
 
+
+// include opencv
+#include <opencv2/opencv.hpp>
+
+//include random
+#include <random>
+
+// include ros handler
+#include <ros/package.h>
+
+
+
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_init;
@@ -51,7 +64,9 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   for (auto const &feat : _db->get_internal_data()) {
     for (auto const &camtimepair : feat.second->timestamps) {
       for (auto const &time : camtimepair.second) {
+        //PRINT_ERROR("[init-d-debug]: newest_cam_time = %f\n", time);
         newest_cam_time = std::max(newest_cam_time, time);
+        //PRINT_ERROR("[init-d-debug]: newest_cam_time_after = %f\n", newest_cam_time);
       }
     }
   }
@@ -98,7 +113,10 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
 
   // Settings
   const int min_num_meas_to_optimize = (int)params.init_window_time;
-  const int min_valid_features = 8;
+  const int min_valid_features = 6;
+  // changed to 6 from 8
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 
   // Validation information for features we can use
   bool have_stereo = false;
@@ -110,6 +128,8 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   map_camera_times[newest_cam_time] = true; // always insert final pose
   std::map<size_t, bool> map_camera_ids;
   double pose_dt_avg = params.init_window_time / (double)(params.init_dyn_num_pose + 1);
+
+
   for (auto const &feat : features) {
 
     // Loop through each timestamp and make sure it is a valid pose
@@ -151,15 +171,55 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
       have_stereo = true;
     }
     count_valid_features++;
+    PRINT_ERROR("[init-d-debug]: Feature %zu added successfully (total valid features = %d)\n", feat.first, count_valid_features);
   }
+  // extarct poses that are atleast once observed in the oldes_caemra_time ( fist iamge observation check)
+  std::vector<size_t> valid_feature_ids;  // To store the IDs of valid features
+
+  // Now filter features that were observed at the oldest_camera_time
+  for (auto const &feat : features) {
+      bool observed_at_oldest_time = false;
+
+      // Check if this feature was observed at the oldest_camera_time
+      for (auto const &camtime : feat.second->timestamps) {
+          if (std::find(camtime.second.begin(), camtime.second.end(), oldest_camera_time) != camtime.second.end()) {
+            observed_at_oldest_time = true;
+            break;  // No need to check further if it's observed
+          }
+      }
+
+      // If observed at the oldest_camera_time, add its ID to the valid_feature_ids
+      if (observed_at_oldest_time) {
+        // Check if the feature has enough measurements
+        if (map_features_num_meas[feat.first] >= min_num_meas_to_optimize) {
+            PRINT_DEBUG("[Valid_feature_ids check]: Feature %zu added successfully (total valid features = %d)\n", feat.first, count_valid_features);
+            valid_feature_ids.push_back(feat.first);
+        } else {
+            PRINT_ERROR("[Valid_feature_ids check]: Feature %zu skipped due to insufficient measurements (%d)\n",
+                        feat.first, map_features_num_meas[feat.first]);
+        }
+      }
+  }
+
+
+  // At the end of the loop, print the summary of all feature IDs used in the successful initialization
+  PRINT_DEBUG("[init-d-debug]: Final Summary of Features Used in Initialization: \n");
+  for (size_t id : valid_feature_ids) {
+      PRINT_DEBUG("Feature ID: %zu\n", id);
+  }
+  // Debugging: Print out the number of valid camera poses and features
+  PRINT_ERROR("[init-d-debug]: Camera poses size = %d, Valid features count = %d, Required features = %d\n",
+              (int)map_camera_times.size(), count_valid_features, min_valid_features);
 
   // Return if we do not have our full window or not enough measurements
   // Also check that we have enough features to initialize with
   if ((int)map_camera_times.size() < params.init_dyn_num_pose) {
-    return false;
+      PRINT_DEBUG(RED "[init-d]: Camera poses insufficient. Have %d, need at least %d\n" RESET,
+                  (int)map_camera_times.size(), params.init_dyn_num_pose);
+      return false;
   }
   if (count_valid_features < min_valid_features) {
-    PRINT_WARNING(RED "[init-d]: only %zu valid features of required %d!!\n" RESET, count_valid_features, min_valid_features);
+    PRINT_DEBUG(RED "[init-d]: only %zu valid features of required %d!!\n" RESET, count_valid_features, min_valid_features);
     return false;
   }
 
@@ -187,7 +247,7 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   }
   accel_inI_norm /= (double)(readings.size() - 1);
   if (180.0 / M_PI * theta_inI_norm < params.init_dyn_min_deg) {
-    PRINT_WARNING(YELLOW "[init-d]: gyroscope only %.2f degree change (%.2f thresh)\n" RESET, 180.0 / M_PI * theta_inI_norm,
+    PRINT_ERROR(YELLOW "[init-d]: gyroscope only %.2f degree change (%.2f thresh)\n" RESET, 180.0 / M_PI * theta_inI_norm,
                   params.init_dyn_min_deg);
     return false;
   }
@@ -233,7 +293,7 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
 
   // Make sure we have enough measurements to fully constrain the system
   if (num_measurements < system_size) {
-    PRINT_WARNING(YELLOW "[init-d]: not enough feature measurements (%d meas vs %d state size)!\n" RESET, num_measurements, system_size);
+    PRINT_ERROR(YELLOW "[init-d]: not enough feature measurements (%d meas vs %d state size)!\n" RESET, num_measurements, system_size);
     return false;
   }
 
@@ -301,191 +361,1326 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
     }
 
     // Finally push back our integrations!
-    map_camera_cpi_I0toIi.insert({current_time, cpiI0toIi1});
+    if (cpiI0toIi1 != nullptr) {
+        PRINT_ERROR("[debug]: Inserting non-nullptr entry into map_camera_cpi_I0toIi for time %.6f\n", current_time);
+        map_camera_cpi_I0toIi.insert({current_time, cpiI0toIi1});
+    } else {
+        PRINT_ERROR("[debug_error]: Attempting to insert nullptr into map_camera_cpi_I0toIi for time %.6f\n", current_time);
+    }
     map_camera_cpi_IitoIi1.insert({current_time, cpiIitoIi1});
     last_camera_timestamp = current_time;
   }
 
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  // Load the depth map corresponding to the oldest_camera_time
+  // Convert the timestamp to a string without the decimal point
+  std::string timestamp_str = std::to_string(oldest_camera_time);
+
+  // Remove the decimal point
+  timestamp_str.erase(std::remove(timestamp_str.begin(), timestamp_str.end(), '.'), timestamp_str.end());
+
+  // Use only the first 16 digits for comparison
+  std::string timestamp_prefix = timestamp_str.substr(0, 15);
+
+  // Construct the directory path
+  std::string depth_map_dir = "/home/jangwon/Desktop/catkin_ws/src/open_vins/ov_init/src/dynamic/depth_map/" + timestamp_prefix + ".png";
+
+  // Log the constructed file path
+  PRINT_DEBUG("[init-d]: Attempting to load depth map from path: %s\n", depth_map_dir.c_str());
+
+
+  // Attempt to load the depth map
+  cv::Mat depth_map = cv::imread(depth_map_dir, cv::IMREAD_UNCHANGED);
+PRINT_ERROR("laplacian_imgs: Channels = {}", depth_map.channels());
+  // Construct the directory path
+  std::string image_dir = "/home/jangwon/Desktop/catkin_ws/src/open_vins/ov_init/src/dynamic/image_raw/" + timestamp_prefix + ".png";
+  std::string depth_colored__dir = "/home/jangwon/Desktop/catkin_ws/src/open_vins/ov_init/src/dynamic/depth_map/" + timestamp_prefix + ".png";
+
+  // Load raw image and depth map
+  cv::Mat laplacian_imgs = cv::imread(image_dir, cv::IMREAD_GRAYSCALE);
+  cv::Mat laplacian_depths = cv::imread(depth_colored__dir, cv::IMREAD_UNCHANGED);
+  // Check if the images are successfully loaded
+    if (laplacian_imgs.empty()) {
+        PRINT_ERROR("Failed to load image at path: %s", image_dir.c_str());
+        return -1; // Exit the program if the image isn't loaded
+    }
+
+  // convert the 16bit to 32bit because bilateral only works with 32 or 64
+  // Ensure single-channel grayscale for bilateral filter
+  // Debugging: Print channel information
+PRINT_ERROR("laplacian_imgs: Channels = {%d}", laplacian_imgs.channels());
+PRINT_ERROR("laplacian_depths: Channels = {%d}", laplacian_depths.channels());
+    // Convert depth map to CV_32F (32-bit float)
+    // if (laplacian_depths.type() != CV_32F) {
+    //     laplacian_depths.convertTo(laplacian_depths, CV_32F);
+    // }
+
+  // Normalize depth map if needed
+  double min_val, max_val;
+  cv::minMaxLoc(laplacian_depths, &min_val, &max_val);
+  laplacian_depths.convertTo(laplacian_depths, CV_32F, 1.0 / (max_val - min_val), -min_val / (max_val - min_val));
+  PRINT_ERROR("Depth map min: %f, max: %f", min_val, max_val);
+
+  // Apply bilateral filtering
+  cv::Mat bilateral_img, laplacian_img;
+  cv::Mat depth_bilateral, laplacian_depth;
+  int bi_d = params.bi_d;
+  int bi_color = params.bi_color;
+  int bi_space = params.bi_space;
+
+
+  // Laplacian operator
+  
+  cv::bilateralFilter(laplacian_imgs, bilateral_img, bi_d,bi_color, bi_space);
+  //PRINT_ERROR("laplacian_depths: Channels = {%d}", bilateral_img.channels());
+  cv::Laplacian(bilateral_img, laplacian_img, CV_64F);
+
+  cv::bilateralFilter(laplacian_depths, depth_bilateral, bi_d,bi_color, bi_space);
+  //PRINT_ERROR("laplacian_depths: Channels = {%d}", bilateral_img.channels());
+  cv::Laplacian(depth_bilateral, laplacian_depth, CV_32F);
+
+  // Sobel operator
+  // // Apply bilateral filter to the image
+  // cv::bilateralFilter(laplacian_imgs, bilateral_img, bi_d, bi_color, bi_space);
+
+  // // Apply Sobel filter to compute gradients in x and y directions for the image
+  // cv::Mat sobel_img_x, sobel_img_y;
+  // cv::Sobel(bilateral_img, sobel_img_x, CV_64F, 1, 0, 3);  // Gradient in x-direction
+  // cv::Sobel(bilateral_img, sobel_img_y, CV_64F, 0, 1, 3);  // Gradient in y-direction
+
+  // // Compute the magnitude of gradients (optional)
+
+  // cv::magnitude(sobel_img_x, sobel_img_y, laplacian_img);
+
+  // // Apply bilateral filter to the depth
+  // cv::bilateralFilter(laplacian_depths, depth_bilateral, bi_d, bi_color, bi_space);
+
+  // // Apply Sobel filter to compute gradients in x and y directions for the depth
+  // cv::Mat sobel_depth_x, sobel_depth_y;
+  // cv::Sobel(depth_bilateral, sobel_depth_x, CV_32F, 1, 0, 3);  // Gradient in x-direction
+  // cv::Sobel(depth_bilateral, sobel_depth_y, CV_32F, 0, 1, 3);  // Gradient in y-direction
+
+  // // Compute the magnitude of gradients (optional)
+
+  // cv::magnitude(sobel_depth_x, sobel_depth_y, laplacian_depth);
+
+  // 4.1 Inverse Depth normalization
+  // Ensure that the depth map is of type CV_16U (16-bit unsigned)
+  if (depth_map.type() != CV_16U) {
+      PRINT_DEBUG(RED "[init-d]: Depth map is not in 16-bit unsigned format as expected!\n" RESET);
+      return false;
+  }
+
+  // Find the minimum and maximum values in the depth map (for 16-bit unsigned)
+  double min_D0_inv, max_D0_inv;
+  cv::minMaxLoc(depth_map, &min_D0_inv, &max_D0_inv);
+
+  // Ensure we have valid min and max values
+  if (min_D0_inv == max_D0_inv) {
+      PRINT_ERROR(RED "[init-d]: Invalid depth map! All values are the same (min == max)!\n" RESET);
+      return false;
+  }
+
+  // Perform the normalization directly on the 16-bit unsigned depth values
+  cv::Mat Dinv = depth_map.clone();
+  // Convert to flaotig point to perform normalization...
+  depth_map.convertTo(Dinv, CV_64F);
+
+
+  // Normalize the depth map using the formula Dinv' = (Dinv - min) / (max - min) + 1
+  Dinv = (Dinv - min_D0_inv) / (max_D0_inv - min_D0_inv) + 1;
+
+  // Log min, max, and some sample values for verification
+  //PRINT_DEBUG("[init-d]: Min D0_inv = %.6f, Max D0_inv = %.6f\n", min_D0_inv, max_D0_inv);
+  //PRINT_DEBUG("[init-d]: Normalized Dinv values (first few elements):\n");
+
+  // Inverse Depth to Depth
+  depth_map = 1/Dinv;
+
+  if (depth_map.empty()) {
+      // Debugging message for failure
+      PRINT_ERROR(RED "[init-d]: Failed to load depth map for timestamp %f from path: %s\n" RESET, oldest_camera_time, depth_map_dir.c_str());
+      return false;
+  } else {
+      // Debugging message for success
+      PRINT_ERROR("[init-d]: Successfully loaded depth map for timestamp %f from path: %s\n", oldest_camera_time, depth_map_dir.c_str());
+  }
+
+  // Define the map
+  std::map<size_t, Eigen::Vector4d> feature_depth_theta_map_one_shot;
+  std::map<size_t, double> feature_weight;
+  // Populate the map
+  for (size_t feat_id : valid_feature_ids) {
+      auto it = features.find(feat_id);
+      if (it == features.end()) {
+          continue;  // Skip if the feature doesn't exist
+      }
+      
+      const auto& feat = it->second;  // Access the shared_ptr<Feature>
+
+      // Depth retrieval (similar to previous logic)
+      double depth = -1.0;
+      Eigen::Vector2d uvs_norm_one_shot;
+      Eigen::Vector3d theta_C0_to_fi;
+      double weight_value;
+
+      bool depth_extracted = false;
+
+      for (const auto& camtime : feat->timestamps) {
+          size_t cam_id = camtime.first;
+
+          for (size_t i = 0; i < camtime.second.size(); i++) {
+              double time = camtime.second[i];
+              if (time == oldest_camera_time) {
+                  // Get the UV coordinates (pixels) at the `oldest_camera_time`
+                  Eigen::Vector2d uvs_one_shot;
+                  uvs_one_shot << (double)feat->uvs.at(cam_id).at(i)(0), (double)feat->uvs.at(cam_id).at(i)(1);
+
+
+                  
+                  // Calculate weight using the weight() function
+                  weight_value = weight(laplacian_img, laplacian_depth, uvs_one_shot(0), uvs_one_shot(1));
+                  PRINT_DEBUG("[weight-debug]: Calculated weight for feature ID %zu at time %.6f: %.6f\n",
+                              feat_id, time, weight_value);
+
+
+                  // Retrieve the depth value from the depth map
+                  depth = depth_map.at<double>(static_cast<int>(uvs_one_shot(1)), static_cast<int>(uvs_one_shot(0)));
+                  PRINT_DEBUG("[init-d-debug]: Depth value at pixel (%d, %d) is: %.3f\n",
+                              static_cast<int>(uvs_one_shot(0)), static_cast<int>(uvs_one_shot(1)), depth);
+
+                  // Store the normalized UV coordinates
+                  uvs_norm_one_shot << (double)feat->uvs_norm.at(cam_id).at(i)(0),
+                                      (double)feat->uvs_norm.at(cam_id).at(i)(1);
+                  
+                  // Bearing vector (theta_C0_to_fi)
+                  Eigen::Vector3d bearing_vector;
+                  bearing_vector << uvs_norm_one_shot(0), uvs_norm_one_shot(1), 1;
+                  bearing_vector.normalize();
+
+                  // Transform to the inertial frame
+                  Eigen::Vector4d q_ItoC = params.camera_extrinsics.at(cam_id).block(0, 0, 4, 1);
+                  Eigen::Matrix3d R_ItoC = quat_2_Rot(q_ItoC);
+                  theta_C0_to_fi = R_ItoC.transpose() * bearing_vector;
+
+                  depth_extracted = true;
+                  break;
+              }
+          }
+          if (depth_extracted) {
+              break;  // Stop after extracting depth for this feature
+          }
+      }
+
+      // Add to the map
+      if (depth_extracted) {
+          Eigen::Vector4d depth_theta;
+          depth_theta << depth, theta_C0_to_fi.x(), theta_C0_to_fi.y(), theta_C0_to_fi.z();
+          feature_depth_theta_map_one_shot[feat_id] = depth_theta;
+          feature_weight[feat_id] = weight_value;
+          // Debugging information
+          //PRINT_DEBUG("Feature ID %zu: Depth = %.6f, Theta = [%.6f, %.6f, %.6f], weight = %.6f\n",
+          //            feat_id, depth, theta_C0_to_fi.x(), theta_C0_to_fi.y(), theta_C0_to_fi.z(), weight_value);
+      } else {
+          PRINT_ERROR("Feature ID %zu: Depth not extracted!\n", feat_id);
+      }
+  }
+
+
+
+
+
+
+   // START RANSAC
+  /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Loop through each feature observation and append it!
   // State ordering is: [features, velocity, gravity]
-  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_measurements, system_size);
-  Eigen::VectorXd b = Eigen::VectorXd::Zero(num_measurements);
+
+  // Final velocity and gravity from lienar system
+  Eigen::Vector3d v_I0inI0;
+  Eigen::Vector3d gravity_inI0;
+
+
+  ///////////////////////////////////////////////////////
   PRINT_DEBUG("[init-d]: system of %d measurement x %d states created (%d features, %s)\n", num_measurements, system_size, num_features,
               (have_stereo) ? "stereo" : "mono");
+
+
+
+  const int max_iterations = params.max_iterations;  // Max RANSAC iterations
+  const int num_features_to_select = 4;
+  const int num_views_required = 3;
+  const double gamma = params.gamma;
+  const int dmin = params.dmin;
+
+  // Ransac Parameter testing
+
+  const double Q = 0.99;  // Desired probability of finding a true inlier set (success probability)
+  int total_measurements = 0;
+
+  double best_reprojection_error = std::numeric_limits<double>::max();
+  Eigen::MatrixXd best_state = Eigen::MatrixXd::Zero(8, 1);
+
+  // Random generator
+  std::random_device rd;
+  //std::mt19937 gen(rd());
+  std::mt19937 gen(42);
+
+  std::unordered_set<size_t> inlier_features_set; // To track inlier features
+  int feature_inlier_count = 0; // Initialize the inlier feature counter
+  
+
+
+
+  int dynamic_iteration = max_iterations;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  int ii=0;
+
+  //for (int ii = 1; ii <= max_iterations; ++ii) {
+  while(ii<dynamic_iteration) {
+
+
+  // Shuffle and select 4 features from the valid features
+  std::shuffle(valid_feature_ids.begin(), valid_feature_ids.end(), gen);
+  std::vector<size_t> selected_feature_ids;
+  
+  // SHuffle and selected 3 views
+  std::vector<double> selected_views;
+
+  // Temporary storage for debugging information
+  std::map<size_t, std::map<size_t, std::vector<double>>> debug_feature_data;
+
+  // SAMPLED VALID features and corresponding measurements
+  std::unordered_map<size_t, std::vector<double>> feature_measurements_map;
+
+  // Ensure we select 4 features, each with at least 3 views
+  for (size_t feat_id : valid_feature_ids) {
+      auto feat = features[feat_id];
+      PRINT_DEBUG("[FROM valid_feautre_ids]: Feature ID = %zu\n", feat_id);
+      // Check if the feature pointer is valid
+
+      if (!feat) {
+          PRINT_ERROR("[Error]: Feature ID = %zu has a null feature pointer!\n", feat_id);
+          continue;  // Skip to the next feature if the pointer is invalid
+      }
+
+          // Iterate over all timestamps for this feature and print them
+      for (const auto &camtime : feat->timestamps) {
+          size_t cam_id = camtime.first;
+          const std::vector<double>& timestamps = camtime.second;
+
+          // Print each timestamp for this feature and camera ID
+          PRINT_DEBUG("[Debug]: Feature ID = %zu, Camera ID = %zu, Timestamps:\n", feat_id, cam_id);
+          for (double ts : timestamps) {
+              PRINT_DEBUG("    Timestamp = %.6f\n", ts);
+          }
+      }
+
+      std::vector<double> all_timestamps;  // Vector to store all timestamps (views)
+
+      // Collect all the timestamps (i.e., the frames in which this feature was observed)
+      for (const auto &camtime : feat->timestamps) {
+          for (double timestamp : camtime.second) {
+            PRINT_DEBUG("[time_debug]: Current timestamp : %.6f\n", timestamp);
+            // Exclude timestamps equal to oldest_camera_time
+            if (timestamp != oldest_camera_time && map_camera_times.find(timestamp) != map_camera_times.end() && map_camera_times[timestamp]) {
+              PRINT_DEBUG("[time_debug]: Damnn eqauls to oldest_camera_time : %.6f\n", timestamp);
+              all_timestamps.push_back(timestamp);  // Add valid timestamps to the vector
+            }
+          }
+      }
+
+      // Only proceed if the feature has been observed in at least 3 frames (views)
+      if (all_timestamps.size() >= num_views_required) {
+          // Randomly shuffle the timestamps and select the first 3
+          std::shuffle(all_timestamps.begin(), all_timestamps.end(), gen);  // 'gen' is your random generator
+          selected_views.assign(all_timestamps.begin(), all_timestamps.begin() + num_views_required);  // Assign selected views
+
+          // Add the feature ID to the selected list
+          selected_feature_ids.push_back(feat_id);
+
+          // Store the selected views in the feature_measurements_map
+          feature_measurements_map[feat_id] = selected_views;  // Store the vector of selected views for this feature
+          
+          // Store the selected views for this feature for RANSAC (or other use)
+          debug_feature_data[feat_id][0] = selected_views;  // Assuming 0 is the camera ID; adjust if needed
+
+          PRINT_ERROR("[4feat&3view]: Feature ID = %zu has %zu unique views (frames)\n", feat_id, all_timestamps.size());
+          PRINT_ERROR("[4feat&3view]: Selected views (timestamps) for Feature ID = %zu: ", feat_id);
+          for (double ts : selected_views) {
+              PRINT_ERROR("%.6f ", ts);  // Print the selected timestamps
+          }
+          PRINT_ERROR("\n");
+      }
+      //PROBABLYR NEEDED
+      // if (A_index_features.find(feat_id) == A_index_features.end()) {
+      // A_index_features.insert({feat_id, idx_feat});
+      // idx_feat += 1;
+      // }
+
+      // Stop once we have selected 4 features
+      if (selected_feature_ids.size() == num_features_to_select) {
+          PRINT_ERROR("[DEBUG]: Reached the desired number of selected features (%zu). Stopping selection.\n", selected_feature_ids.size());
+          break;
+      }
+  }
+  // NEEDED OR NOT NOT KNOWN
+  // Skip this iteration if we didn't manage to select exactly 4 features with 3 views each
+  // if (selected_feature_ids.size() != num_features_to_select) {
+  //     continue;
+  // }
+
+  // inlier set S and also later be the final matrix
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(24, 8);
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(24);
+
+
+
   int index_meas = 0;
   int idx_feat = 0;
+  int idx_feat_meas = 0;
   std::map<size_t, int> A_index_features;
-  for (auto const &feat : features) {
+
+  for (size_t feat_id : selected_feature_ids) {
+    // Find the feature by its ID in the features map
+    auto it = features.find(feat_id);  // `it` is an iterator to the key-value pair
+
+    if (it != features.end()) {
+        // Access key-value pair: `it->first` is the key, `it->second` is the shared_ptr<Feature>
+        const auto& feat = *it;  // `feat` is a std::pair<const size_t, std::shared_ptr<Feature>>
+        // DEBUG: Print Feature ID and information about the feature
+        PRINT_DEBUG("[debug_feature]: Feature ID = %zu\n", feat.first);
+            // Calculate the total number of observations (sum across all camera timestamps)
+        size_t total_observations = 0;
+        for (const auto &camtime : feat.second->timestamps) {
+            total_observations += camtime.second.size(); // sum the number of timestamps for each camera
+        }
+
+        PRINT_DEBUG("[debug_feature]: Total number of observations for this feature: %zu\n", total_observations);
+
+    // Check if this feature ID is in the selected_feature_ids
+    //if (std::find(selected_feature_ids.begin(), selected_feature_ids.end(), feat.first) == selected_feature_ids.end())
+    //    continue;  // Skip if not in selected feature IDs
+
     if (map_features_num_meas[feat.first] < min_num_meas_to_optimize)
-      continue;
+    continue;
     if (A_index_features.find(feat.first) == A_index_features.end()) {
-      A_index_features.insert({feat.first, idx_feat});
-      idx_feat += 1;
+    A_index_features.insert({feat.first, idx_feat});
+    idx_feat += 1;
     }
-    for (auto const &camtime : feat.second->timestamps) {
+    // Retrieve the selected views for this feature
+    //const auto &selected_views = debug_feature_data[feat.first];
 
-      // This camera
-      size_t cam_id = camtime.first;
-      Eigen::Vector4d q_ItoC = params.camera_extrinsics.at(cam_id).block(0, 0, 4, 1);
-      Eigen::Vector3d p_IinC = params.camera_extrinsics.at(cam_id).block(4, 0, 3, 1);
-      Eigen::Matrix3d R_ItoC = quat_2_Rot(q_ItoC);
 
-      // Loop through each observation
-      for (size_t i = 0; i < camtime.second.size(); i++) {
 
-        // Skip measurements we don't have poses for
-        double time = feat.second->timestamps.at(cam_id).at(i);
-        if (map_camera_times.find(time) == map_camera_times.end())
-          continue;
+    // Retrieve the selected views for this specific feature
+    const std::vector<double>& selected_views = feature_measurements_map[feat_id];
+
+    // Debugging: Print the selected views for the current feature ID
+    PRINT_DEBUG("[FEature_measurement_id]: Selected views for Feature ID = %zu:\n", feat_id);
+    for (size_t i = 0; i < selected_views.size(); i++) {
+        PRINT_DEBUG("[feature_measurement_id]: View %zu -> Timestamp = %.6f\n", i + 1, selected_views[i]);
+    }
+
+    for (const auto &camtime : feat.second->timestamps) {
+
+    // This camera
+    size_t cam_id = camtime.first;
+    Eigen::Vector4d q_ItoC = params.camera_extrinsics.at(cam_id).block(0, 0, 4, 1);
+    Eigen::Vector3d p_IinC = params.camera_extrinsics.at(cam_id).block(4, 0, 3, 1);
+    Eigen::Matrix3d R_ItoC = quat_2_Rot(q_ItoC);
+
+    // Loop through each observation
+    for (size_t i = 0; i < camtime.second.size(); i++) {
+
+    // Skip measurements we don't have poses for
+    double time = feat.second->timestamps.at(cam_id).at(i);
+
+    // **Only proceed if this timestamp is in the `selected_views` for the feature**
+    if (std::find(selected_views.begin(), selected_views.end(), time) == selected_views.end()) {
+        continue;  // Skip this observation if not in `selected_views`
+    }
+
+
+    if (map_camera_times.find(time) == map_camera_times.end() || time == oldest_camera_time) {
+        PRINT_ERROR("[debug_feature]: Skipping time %.6f (pose not found or oldest_camera_time)\n", time);
+        continue;
+    }
+
+        // Check if this timestamp is in the selected views
+        //if (std::find(selected_views.begin(), selected_views.end(), time) == selected_views.end())
+        //  continue;  // Skip if not in selected views
 
         // Our measurement
         Eigen::Vector2d uv_norm;
         uv_norm << (double)feat.second->uvs_norm.at(cam_id).at(i)(0), (double)feat.second->uvs_norm.at(cam_id).at(i)(1);
 
+// Check if the feature exists in the map
+    auto now = feature_depth_theta_map_one_shot.find(feat_id);
+    if (now == feature_depth_theta_map_one_shot.end()) {
+        PRINT_ERROR("Error: Feature ID %zu not found in feature_depth_theta_map_one_shot\n", feat_id);
+        continue;  // Skip this feature if it's not in the map
+    }
+
+    // Access precomputed depth and bearing values
+    const auto& depth_bearing = now->second;
+    double depth = depth_bearing(0);  // Precomputed depth
+    Eigen::Vector3d theta_C0_to_fi;
+    theta_C0_to_fi << depth_bearing(1), depth_bearing(2), depth_bearing(3);  // Precomputed bearing vector
+
+    PRINT_DEBUG("[RANSAC-Simplified]: Feature ID %zu -> Depth: %.3f, Bearing: [%.3f, %.3f, %.3f]\n",
+                feat_id, depth, theta_C0_to_fi(0), theta_C0_to_fi(1), theta_C0_to_fi(2));
+
+    // Retrieve the selected views for this specific feature
+    const std::vector<double>& selected_views = feature_measurements_map[feat_id];
+
+        // vector Bi
+        Eigen::MatrixXd B_i(3, 2);
+        B_i.col(0) = depth * theta_C0_to_fi;  // Depth-scaled bearing vector
+        B_i.col(1) = theta_C0_to_fi;  // Unscaled bearing vector
+        // Debug print B_i matrix (3x2)
+        PRINT_DEBUG("[Debug]: B_i matrix:\n");
+        PRINT_DEBUG("[%.6f, %.6f]\n", B_i(0, 0), B_i(0, 1));
+        PRINT_DEBUG("[%.6f, %.6f]\n", B_i(1, 0), B_i(1, 1));
+        PRINT_DEBUG("[%.6f, %.6f]\n", B_i(2, 0), B_i(2, 1));
+
+
         // Preintegration values
         double DT = 0.0;
         Eigen::MatrixXd R_I0toIk = Eigen::MatrixXd::Identity(3, 3);
         Eigen::MatrixXd alpha_I0toIk = Eigen::MatrixXd::Zero(3, 1);
-        if (map_camera_cpi_I0toIi.find(time) != map_camera_cpi_I0toIi.end() && map_camera_cpi_I0toIi.at(time) != nullptr) {
-          DT = map_camera_cpi_I0toIi.at(time)->DT;
-          R_I0toIk = map_camera_cpi_I0toIi.at(time)->R_k2tau;
-          alpha_I0toIk = map_camera_cpi_I0toIi.at(time)->alpha_tau;
+        // Debug: Check if the time exists in the map
+        // IF FIXED, can just return to normal code
+        if (map_camera_cpi_I0toIi.find(time) != map_camera_cpi_I0toIi.end()) {
+            PRINT_DEBUG("[debug]: Found time %.6f in map_camera_cpi_I0toIi\n", time);
+            
+            // Check if the entry is not nullptr
+            if (map_camera_cpi_I0toIi.at(time) != nullptr) {
+                // Assign values
+                DT = map_camera_cpi_I0toIi.at(time)->DT;
+                R_I0toIk = map_camera_cpi_I0toIi.at(time)->R_k2tau;
+                alpha_I0toIk = map_camera_cpi_I0toIi.at(time)->alpha_tau;
+
+                // Print the values of DT, R_I0toIk, and alpha_I0toIk
+                PRINT_DEBUG("[debug]: DT = %.6f\n", DT);
+                PRINT_DEBUG("[debug]: R_I0toIk matrix:\n");
+                for (int i = 0; i < R_I0toIk.rows(); ++i) {
+                    PRINT_DEBUG("[%.6f, %.6f, %.6f]\n", R_I0toIk(i, 0), R_I0toIk(i, 1), R_I0toIk(i, 2));
+                }
+                PRINT_DEBUG("[debug]: alpha_I0toIk = [%.6f, %.6f, %.6f]\n", alpha_I0toIk(0), alpha_I0toIk(1), alpha_I0toIk(2));
+            } else {
+                PRINT_ERROR("[debug_error]: Entry for time %.6f is nullptr in map_camera_cpi_I0toIi\n", time);
+            }
+        } else {
+            PRINT_ERROR("[debug_error]: Time %.6f not found in map_camera_cpi_I0toIi\n", time);
+        }
+        
+        // Print the value of DT for debugging
+        PRINT_DEBUG("[DT _error]: DT value: %.6f\n", DT);
+
+        // H_proj initialization
+        Eigen::MatrixXd H_proj = Eigen::MatrixXd::Zero(2, 3);
+
+        // Check and print uv_norm before using it
+        PRINT_DEBUG("[debug_error]: uv_norm values: [%.6f, %.6f]\n", uv_norm(0), uv_norm(1));
+
+        // Populate H_proj matrix
+        H_proj << 1, 0, -uv_norm(0), 0, 1, -uv_norm(1);
+
+        // Debug: Confirm matrix dimensions and values
+        PRINT_DEBUG("[debug_error]: H_proj matrix dimensions: (%d, %d)\n", H_proj.rows(), H_proj.cols());
+
+        // Debug: Print H_proj matrix values
+        PRINT_DEBUG("[debug_error]: H_proj matrix:\n[%.6f, %.6f, %.6f]\n[%.6f, %.6f, %.6f]\n",
+                    H_proj(0, 0), H_proj(0, 1), H_proj(0, 2),
+                    H_proj(1, 0), H_proj(1, 1), H_proj(1, 2));
+
+        // Check if uv_norm affects H_proj correctly (just a logical debug point)
+        if (H_proj(0, 2) == -uv_norm(0) && H_proj(1, 2) == -uv_norm(1)) {
+            PRINT_DEBUG("[debug_check]: H_proj populated correctly with uv_norm values.\n");
+        } else {
+            PRINT_WARNING("[debug_check]: H_proj may have incorrect values! Check uv_norm assignment.\n");
         }
 
-        // Create the linear system based on the feature reprojection
-        // [ 1 0 -u ] p_FinCi = [ 0 ]
-        // [ 0 1 -v ]           [ 0 ]
-        // where
-        // p_FinCi = R_C0toCi * R_ItoC * (p_FinI0 - p_IiinI0) + p_IinC
-        //         = R_C0toCi * R_ItoC * (p_FinI0 - v_I0inI0 * dt - 0.5 * grav_inI0 * dt^2 - alpha) + p_IinC
-        Eigen::MatrixXd H_proj = Eigen::MatrixXd::Zero(2, 3);
-        H_proj << 1, 0, -uv_norm(0), 0, 1, -uv_norm(1);
+
+        // Y matrix calculation
         Eigen::MatrixXd Y = H_proj * R_ItoC * R_I0toIk;
-        Eigen::MatrixXd H_i = Eigen::MatrixXd::Zero(2, system_size);
-        Eigen::MatrixXd b_i = Y * alpha_I0toIk - H_proj * p_IinC;
-        if (size_feature == 1) {
-          assert(false);
-          // Substitute in p_FinI0 = z*bearing_inC0_rotI0 - R_ItoC^T*p_IinC
-          // H_i.block(0, size_feature * A_index_features.at(feat.first), 2, 1) = Y * features_bearings.at(feat.first);
-          // b_i += Y * R_ItoC.transpose() * p_IinC;
-        } else {
-          H_i.block(0, size_feature * A_index_features.at(feat.first), 2, 3) = Y; // feat
+
+        // Debug Y matrix
+        PRINT_DEBUG("[debug_error]: Y matrix size (%d, %d):\n", Y.rows(), Y.cols());
+        for (int i = 0; i < Y.rows(); ++i) {
+            for (int j = 0; j < Y.cols(); ++j) {
+                PRINT_DEBUG("%.6f ", Y(i, j));
+            }
+            PRINT_DEBUG("\n");
         }
-        H_i.block(0, size_feature * num_features + 0, 2, 3) = -DT * Y;            // vel
-        H_i.block(0, size_feature * num_features + 3, 2, 3) = 0.5 * DT * DT * Y;  // grav
+
+        // Initialize H_i
+        Eigen::MatrixXd H_i = Eigen::MatrixXd::Zero(24, 8);
+
+        // b_i calculation for depth-aided feature bearing model
+        Eigen::MatrixXd b_i = Y * (alpha_I0toIk - (-R_ItoC.transpose() * p_IinC)) - H_proj * p_IinC;
+        double weighting = feature_weight[feat_id];
+        // Apply Weighting
+        //b_i *= weighting;
+        b_i *= std::sqrt(weighting);
+
+
+
+
+
+
+
+        // Debug weight
+        PRINT_ERROR("[Weight]: Weight (%f):\n", weighting);
+
+        // Debug b_i matrix
+        PRINT_DEBUG("[debug_error]: b_i matrix size (%d, %d):\n", b_i.rows(), b_i.cols());
+        for (int i = 0; i < b_i.rows(); ++i) {
+            for (int j = 0; j < b_i.cols(); ++j) {
+                //PRINT_ERROR("%.6f ", b_i(i, j));
+            }
+            //PRINT_ERROR("\n");
+        }
+        if (size_feature == 1) {
+        assert(false);
+        // Substitute in p_FinI0 = z*bearing_inC0_rotI0 - R_ItoC^T*p_IinC
+        // H_i.block(0, size_feature * A_index_features.at(feat.first), 2, 1) = Y * features_bearings.at(feat.first);
+        // b_i += Y * R_ItoC.transpose() * p_IinC;
+        } else {
+        PRINT_DEBUG("[debug_error]: Y*B_i matrix size (%d, %d)\n", (Y * B_i).rows(), (Y * B_i).cols());
+        PRINT_DEBUG("[debug_error]: Assigning to H_i at block (row %d, col 2), size (2, 3)\n", 2 * idx_feat_meas);
+        H_i.block(2*idx_feat_meas, 0, 2, 2) = Y*B_i; // feat
+        }
+        PRINT_DEBUG("[debug_error]: -DT * Y matrix size (%d, %d)\n", (-DT * Y).rows(), (-DT * Y).cols());
+
+        // Print values of -DT * Y
+        PRINT_DEBUG("[debug_error]: -DT * Y values:\n");
+        PRINT_DEBUG("[debug_error]: -DT value: (%.6f)\n", DT);
+        for (int i = 0; i < (-DT * Y).rows(); ++i) {
+            for (int j = 0; j < (-DT * Y).cols(); ++j) {
+                PRINT_DEBUG("%.6f ", (-DT * Y)(i, j));
+            }
+            PRINT_DEBUG("\n");
+        }
+
+        H_i.block(2*idx_feat_meas, 2, 2, 3) = -DT * Y;            // vel
+
+        PRINT_DEBUG("[debug_error]: 0.5 * DT * DT * Y matrix size (%d, %d)\n", (0.5 * DT * DT * Y).rows(), (0.5 * DT * DT * Y).cols());
+
+        H_i.block(2*idx_feat_meas, 5, 2, 3) = 0.5 * DT * DT * Y;  // grav
+
+
+        // Print H_i matrix after assignment
+        PRINT_DEBUG("[debug_error]: H_i matrix size (%d, %d):\n", H_i.rows(), H_i.cols());
+        for (int i = 0; i < H_i.rows(); ++i) {
+            for (int j = 0; j < H_i.cols(); ++j) {
+                //PRINT_ERROR("%.6f ", H_i(i, j));
+            }
+            //PRINT_ERROR("\n");
+        }
+
+        // Apply Weighting
+        //H_i *= weighting;
+        H_i *= std::sqrt(weighting);
 
         // Else lets append this to our system!
-        A.block(index_meas, 0, 2, A.cols()) = H_i;
-        b.block(index_meas, 0, 2, 1) = b_i;
-        index_meas += 2;
+        PRINT_DEBUG("[debug_error]: Assigning to A at block (row %d, col 0), size (24, 8)\n", 2 * idx_feat_meas);
+        //A.block(2*idx_feat_meas, 0, 24, 8) = H_i;
+        A.block(2*idx_feat_meas, 0, 2, 8) = H_i.block(2*idx_feat_meas, 0, 2, 8);
+
+        // Debug: Print the size and content of the A matrix
+        PRINT_DEBUG("[debug_error]: A matrix size (%d, %d):\n", A.rows(), A.cols());
+        for (int i = 0; i < A.rows(); ++i) {
+            for (int j = 0; j < A.cols(); ++j) {
+                //PRINT_ERROR("%.6f", A(i, j));
+            }
+            //PRINT_ERROR("\n");
+        }
+        
+        PRINT_DEBUG("[debug_error]: Assigning to b at block (row %d, col 0), size (24, 1)\n", 2 * idx_feat_meas);
+        PRINT_DEBUG("[debug_error]: b_i matrix size (%d, %d):\n", b_i.rows(), b_i.cols());
+        for (int i = 0; i < b_i.rows(); ++i) {
+            for (int j = 0; j < b_i.cols(); ++j) {
+                //PRINT_ERROR("%.6f ", b_i(i, j));  // Adjust the format based on the precision you want
+            }
+            //PRINT_ERROR("\n");  // Newline after each row
+        }
+
+
+
+        b.block(2*idx_feat_meas, 0, 2, 1) = b_i;
+        PRINT_DEBUG("[debug_error]: b matrix size (%d, %d):\n", b.rows(), b.cols());
+        for (int i = 0; i < b.rows(); ++i) {
+            for (int j = 0; j < b.cols(); ++j) {
+                //PRINT_ERROR("%.6f ", b(i, j));  // Adjust the format based on the precision you want
+            }
+            //PRINT_ERROR("\n");  // Newline after each row
+        }
+
+
+
+        idx_feat_meas++;
+        
+        // If A is full, break the outermost loop
+        if (2 * idx_feat_meas >= A.rows()) {
+        PRINT_DEBUG("[debug_error]: Stopping loop as the A matrix is full (%d rows)\n", A.rows());
+        break;  // Exit the loop when A matrix is full
+        }
+        
+          }
+          // If A is full, break the outermost loop
+          if (2 * idx_feat_meas >= A.rows()) {
+          PRINT_DEBUG("[debug_error]: Stopping loop as the A matrix is full (%d rows)\n", A.rows());
+          break;  // Exit the loop when A matrix is full
+          }
+
+        }
+
+        // If A is full, break the outermost loop
+        if (2 * idx_feat_meas >= A.rows()) {
+        PRINT_DEBUG("[debug_error]: Stopping loop as the A matrix is full (%d rows)\n", A.rows());
+        break;  // Exit the loop when A matrix is full
+        }
+
       }
-    }
-  }
-  auto rT3 = boost::posix_time::microsec_clock::local_time();
 
-  // ======================================================
-  // ======================================================
-
-  // Solve the linear system without constraint
-  // Eigen::MatrixXd AtA = A.transpose() * A;
-  // Eigen::MatrixXd Atb = A.transpose() * b;
-  // Eigen::MatrixXd x_hat = AtA.colPivHouseholderQr().solve(Atb);
-
-  // Constrained solving |g| = 9.81 constraint
-  Eigen::MatrixXd A1 = A.block(0, 0, A.rows(), A.cols() - 3);
-  // Eigen::MatrixXd A1A1_inv = (A1.transpose() * A1).inverse();
-  Eigen::MatrixXd A1A1_inv = (A1.transpose() * A1).llt().solve(Eigen::MatrixXd::Identity(A1.cols(), A1.cols()));
-  Eigen::MatrixXd A2 = A.block(0, A.cols() - 3, A.rows(), 3);
-  Eigen::MatrixXd Temp = A2.transpose() * (Eigen::MatrixXd::Identity(A1.rows(), A1.rows()) - A1 * A1A1_inv * A1.transpose());
-  Eigen::MatrixXd D = Temp * A2;
-  Eigen::MatrixXd d = Temp * b;
-  Eigen::Matrix<double, 7, 1> coeff = InitializerHelper::compute_dongsi_coeff(D, d, params.gravity_mag);
-
-  // Create companion matrix of our polynomial
-  // https://en.wikipedia.org/wiki/Companion_matrix
-  assert(coeff(0) == 1);
-  Eigen::Matrix<double, 6, 6> companion_matrix = Eigen::Matrix<double, 6, 6>::Zero(coeff.rows() - 1, coeff.rows() - 1);
-  companion_matrix.diagonal(-1).setOnes();
-  companion_matrix.col(companion_matrix.cols() - 1) = -coeff.reverse().head(coeff.rows() - 1);
-  Eigen::JacobiSVD<Eigen::Matrix<double, 6, 6>> svd0(companion_matrix);
-  Eigen::MatrixXd singularValues0 = svd0.singularValues();
-  double cond0 = singularValues0(0) / singularValues0(singularValues0.rows() - 1);
-  PRINT_DEBUG("[init-d]: CM cond = %.3f | rank = %d of %d (%4.3e thresh)\n", cond0, (int)svd0.rank(), (int)companion_matrix.cols(),
-              svd0.threshold());
-  if (svd0.rank() != companion_matrix.rows()) {
-    PRINT_ERROR(RED "[init-d]: eigenvalue decomposition not full rank!!\n" RESET);
-    return false;
-  }
-
-  // Find its eigenvalues (can be complex)
-  Eigen::EigenSolver<Eigen::Matrix<double, 6, 6>> solver(companion_matrix, false);
-  if (solver.info() != Eigen::Success) {
-    PRINT_ERROR(RED "[init-d]: failed to compute the eigenvalue decomposition!!\n" RESET);
-    return false;
-  }
-
-  // Find the smallest real eigenvalue
-  // NOTE: we find the one that gives us minimal constraint cost
-  // NOTE: not sure if the best, but one that gives the correct mag should be good?
-  bool lambda_found = false;
-  double lambda_min = -1;
-  double cost_min = INFINITY;
-  Eigen::MatrixXd I_dd = Eigen::MatrixXd::Identity(D.rows(), D.rows());
-  // double g2 = params.gravity_mag * params.gravity_mag;
-  // Eigen::MatrixXd ddt = d * d.transpose();
-  for (int i = 0; i < solver.eigenvalues().size(); i++) {
-    auto val = solver.eigenvalues()(i);
-    if (val.imag() == 0) {
-      double lambda = val.real();
-      // Eigen::MatrixXd mat = (D - lambda * I_dd) * (D - lambda * I_dd) - 1 / g2 * ddt;
-      // double cost = mat.determinant();
-      Eigen::MatrixXd D_lambdaI_inv = (D - lambda * I_dd).llt().solve(I_dd);
-      Eigen::VectorXd state_grav = D_lambdaI_inv * d;
-      double cost = std::abs(state_grav.norm() - params.gravity_mag);
-      // std::cout << lambda << " - " << cost << " -> " << state_grav.transpose() << std::endl;
-      if (!lambda_found || cost < cost_min) {
-        lambda_found = true;
-        lambda_min = lambda;
-        cost_min = cost;
+      PRINT_DEBUG("[idx_feat_meas]: idx_feat_meas : %d \n", idx_feat_meas);
+      // If A is full, break the outermost loop
+      if (2 * idx_feat_meas >= A.rows()) {
+      PRINT_DEBUG("[debug_error]: Stopping loop as the A matrix is full (%d rows)\n", A.rows());
+      break;  // Exit the loop when A matrix is full
       }
+
     }
-  }
-  if (!lambda_found) {
-    PRINT_ERROR(RED "[init-d]: failed to find a real eigenvalue!!!\n" RESET);
-    return false;
-  }
-  PRINT_DEBUG("[init-d]: smallest real eigenvalue = %.5f (cost of %f)\n", lambda_min, cost_min);
 
-  // Recover our gravity from the constraint!
-  // Eigen::MatrixXd D_lambdaI_inv = (D - lambda_min * I_dd).inverse();
-  Eigen::MatrixXd D_lambdaI_inv = (D - lambda_min * I_dd).llt().solve(I_dd);
-  Eigen::VectorXd state_grav = D_lambdaI_inv * d;
 
-  // Overwrite our state: [features, velocity, gravity]
-  Eigen::VectorXd state_feat_vel = -A1A1_inv * A1.transpose() * A2 * state_grav + A1A1_inv * A1.transpose() * b;
-  Eigen::MatrixXd x_hat = Eigen::MatrixXd::Zero(system_size, 1);
-  x_hat.block(0, 0, size_feature * num_features + 3, 1) = state_feat_vel;
-  x_hat.block(size_feature * num_features + 3, 0, 3, 1) = state_grav;
-  Eigen::Vector3d v_I0inI0 = x_hat.block(size_feature * num_features + 0, 0, 3, 1);
-  PRINT_INFO("[init-d]: velocity in I0 was %.3f,%.3f,%.3f and |v| = %.4f\n", v_I0inI0(0), v_I0inI0(1), v_I0inI0(2), v_I0inI0.norm());
 
-  // Check gravity magnitude to see if converged
-  Eigen::Vector3d gravity_inI0 = x_hat.block(size_feature * num_features + 3, 0, 3, 1);
-  double init_max_grav_difference = 1e-3;
-  if (std::abs(gravity_inI0.norm() - params.gravity_mag) > init_max_grav_difference) {
-    PRINT_WARNING(YELLOW "[init-d]: gravity did not converge (%.3f > %.3f)\n" RESET, std::abs(gravity_inI0.norm() - params.gravity_mag),
-                  init_max_grav_difference);
-    return false;
+
+
+
+
+
+
+
+
+
+
+    auto rT3 = boost::posix_time::microsec_clock::local_time();
+
+    // ======================================================
+    // ======================================================
+
+    // Solve the linear system without constraint
+    // Eigen::MatrixXd AtA = A.transpose() * A;
+    // Eigen::MatrixXd Atb = A.transpose() * b;
+    // Eigen::MatrixXd x_hat = AtA.colPivHouseholderQr().solve(Atb);
+    // Scale matrix rows to unit norm
+// for (int i = 0; i < A.rows(); ++i) {
+//     A.row(i) /= (A.row(i).norm()+b.row(i).norm());
+// }
+// for (int i = 0; i < b.rows(); ++i) {
+//     b.row(i) /=(A.row(i).norm()+b.row(i).norm());
+// }
+
+    // Constrained solving |g| = 9.81 constraint
+    Eigen::MatrixXd A1 = A.block(0, 0, A.rows(), A.cols() - 3);
+    // Eigen::MatrixXd A1A1_inv = (A1.transpose() * A1).inverse();
+    Eigen::MatrixXd A1A1_inv = (A1.transpose() * A1).llt().solve(Eigen::MatrixXd::Identity(A1.cols(), A1.cols()));
+    Eigen::MatrixXd A2 = A.block(0, A.cols() - 3, A.rows(), 3);
+    Eigen::MatrixXd Temp = A2.transpose() * (Eigen::MatrixXd::Identity(A1.rows(), A1.rows()) - A1 * A1A1_inv * A1.transpose());
+    Eigen::MatrixXd D = Temp * A2;
+    Eigen::MatrixXd d = Temp * b;
+    Eigen::Matrix<double, 7, 1> coeff = InitializerHelper::compute_dongsi_coeff(D, d, params.gravity_mag);
+    // 4. Normalize polynomial coefficients if necessary
+    // Create companion matrix of our polynomial
+    // https://en.wikipedia.org/wiki/Companion_matrix
+    assert(coeff(0) == 1);
+    Eigen::Matrix<double, 6, 6> companion_matrix = Eigen::Matrix<double, 6, 6>::Zero(coeff.rows() - 1, coeff.rows() - 1);
+    companion_matrix.diagonal(-1).setOnes();
+    companion_matrix.col(companion_matrix.cols() - 1) = -coeff.reverse().head(coeff.rows() - 1);
+    Eigen::JacobiSVD<Eigen::Matrix<double, 6, 6>> svd0(companion_matrix);
+    Eigen::MatrixXd singularValues0 = svd0.singularValues();
+    double cond0 = singularValues0(0) / singularValues0(singularValues0.rows() - 1);
+    
+    PRINT_ERROR("[SOLVE Linear]:  1 \n");
+    PRINT_ERROR("[init-d]: CM cond = %.3f | rank = %d of %d (%4.3e thresh)\n", cond0, (int)svd0.rank(), (int)companion_matrix.cols(),
+                svd0.threshold());
+    if (svd0.rank() != companion_matrix.rows()) {
+        PRINT_ERROR(RED "[init-d]: eigenvalue decomposition not full rank!!\n" RESET);
+        continue;
+        //return false;
+    }
+
+    // Find its eigenvalues (can be complex)
+    Eigen::EigenSolver<Eigen::Matrix<double, 6, 6>> solver(companion_matrix, false);
+    if (solver.info() != Eigen::Success) {
+        PRINT_ERROR(RED "[init-d]: failed to compute the eigenvalue decomposition!!\n" RESET);
+        continue;
+        //return false;
+    }
+
+    // Find the smallest real eigenvalue
+    // NOTE: we find the one that gives us minimal constraint cost
+    // NOTE: not sure if the best, but one that gives the correct mag should be good?
+    bool lambda_found = false;
+    double lambda_min = -1;
+    double cost_min = INFINITY;
+    Eigen::MatrixXd I_dd = Eigen::MatrixXd::Identity(D.rows(), D.rows());
+    // double g2 = params.gravity_mag * params.gravity_mag;
+    // Eigen::MatrixXd ddt = d * d.transpose();
+    for (int i = 0; i < solver.eigenvalues().size(); i++) {
+        auto val = solver.eigenvalues()(i);
+        if (val.imag() == 0) {
+        double lambda = val.real();
+        // Eigen::MatrixXd mat = (D - lambda * I_dd) * (D - lambda * I_dd) - 1 / g2 * ddt;
+        // double cost = mat.determinant();
+        Eigen::MatrixXd D_lambdaI_inv = (D - lambda * I_dd).llt().solve(I_dd);
+        Eigen::VectorXd state_grav = D_lambdaI_inv * d;
+        double cost = std::abs(state_grav.norm() - params.gravity_mag);
+        // std::cout << lambda << " - " << cost << " -> " << state_grav.transpose() << std::endl;
+        if (!lambda_found || cost < cost_min) {
+            lambda_found = true;
+            lambda_min = lambda;
+            cost_min = cost;
+        }
+        }
+    }
+    if (!lambda_found) {
+        PRINT_ERROR(RED "[init-d]: failed to find a real eigenvalue!!!\n" RESET);
+        return false;
+    }
+    PRINT_ERROR("[init-d]: smallest real eigenvalue = %.5f (cost of %f)\n", lambda_min, cost_min);
+    PRINT_ERROR("[SOLVE Linear]:  2 \n");
+    // Recover our gravity from the constraint!
+    // Eigen::MatrixXd D_lambdaI_inv = (D - lambda_min * I_dd).inverse();
+    Eigen::MatrixXd D_lambdaI_inv = (D - lambda_min * I_dd).llt().solve(I_dd);
+    Eigen::VectorXd state_grav = D_lambdaI_inv * d;
+
+    PRINT_ERROR("[SOLVE Linear]:  3 \n");
+
+
+
+    // Overwrite our learned view state!! [a b v g]
+
+    Eigen::VectorXd state_a_b_vel = -A1A1_inv * A1.transpose() * A2 * state_grav + A1A1_inv * A1.transpose() * b;
+    PRINT_ERROR("[SOLVE Linear]:  4 \n");
+    Eigen::MatrixXd x_hat = Eigen::MatrixXd::Zero(8, 1);
+    PRINT_ERROR("[SOLVE Linear]:  5 \n");
+
+    x_hat.block(0, 0, 2 + 3, 1) = state_a_b_vel;
+    x_hat.block(2 + 3, 0, 3, 1) = state_grav;
+    PRINT_ERROR("[SOLVE Linear]:  6 \n");
+    // Eigen::Vector3d v_I0inI0 = x_hat.block(2, 0, 3, 1);
+    // PRINT_INFO("[init-d]: velocity in I0 was %.3f,%.3f,%.3f and |v| = %.4f\n", v_I0inI0(0), v_I0inI0(1), v_I0inI0(2), v_I0inI0.norm());
+    PRINT_ERROR("[SOLVE Linear]:  7 \n");
+    // Check gravity magnitude to see if converged
+    Eigen::Vector3d minimal_gravity_inI0 = x_hat.block(5, 0, 3, 1);
+
+    double init_max_grav_difference = 1e-3;
+    if (std::abs(minimal_gravity_inI0.norm() - params.gravity_mag) > init_max_grav_difference) {
+        PRINT_WARNING(YELLOW "[init-d]: gravity did not converge (%.3f > %.3f)\n" RESET, std::abs(minimal_gravity_inI0.norm() - params.gravity_mag),
+                    init_max_grav_difference);
+        continue;
+        //return false;
+    }
+    PRINT_INFO("[init-d]: gravity in I0 was %.3f,%.3f,%.3f and |g| = %.4f\n", minimal_gravity_inI0(0), minimal_gravity_inI0(1), minimal_gravity_inI0(2),
+                minimal_gravity_inI0.norm());
+    
+
+
+
+
+
+
+
+
+
+
+
+
+    /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // NON-S group reprojection error
+    // Reprojection error
+    std::vector<int> inliers;
+    int inlier_count = 0;
+
+
+    // Calculate the total number of measurements for the non-sampled features
+        int total_non_S_measurements = 0;
+        for (size_t feat_id : valid_feature_ids) {
+            const auto& feat = features.at(feat_id);
+            if (feature_measurements_map.find(feat_id) == feature_measurements_map.end()) {
+                total_non_S_measurements += map_features_num_meas[feat_id];  // Count all measurements
+            } else {
+                // Subtract the number of sampled views for features that were partially sampled
+                total_non_S_measurements += map_features_num_meas[feat_id] - feature_measurements_map[feat_id].size();
+            }
+        }
+        total_measurements = total_non_S_measurements;
+        PRINT_DEBUG(RED "Total number of sammple: %d\n" RESET, total_non_S_measurements );
+        // Size of A_non_S and b_non_S will be (2 * total_non_S_measurements x 8)
+        Eigen::MatrixXd A_non_S = Eigen::MatrixXd::Zero(2 * total_non_S_measurements, 8);
+        Eigen::VectorXd b_non_S = Eigen::VectorXd::Zero(2 * total_non_S_measurements);
+
+
+
+        // Index to track which row in A_non_S and b_non_S we are filling
+        int idx_feat_meas_non_S = 0;
+
+
+
+
+
+        // Loop through the valid features (those observed in the first image)
+        for (size_t feat_id : valid_feature_ids) {
+            const auto& feat = features.at(feat_id);
+
+            // Check if the feature is partially sampled
+            bool is_partially_sampled = (feature_measurements_map.find(feat_id) != feature_measurements_map.end());
+
+
+
+            // Process each timestamp for the feature
+            for (const auto &camtime : feat->timestamps) {
+                size_t cam_id = camtime.first;
+                Eigen::Vector4d q_ItoC = params.camera_extrinsics.at(cam_id).block(0, 0, 4, 1);
+                Eigen::Vector3d p_IinC = params.camera_extrinsics.at(cam_id).block(4, 0, 3, 1);
+                Eigen::Matrix3d R_ItoC = quat_2_Rot(q_ItoC);
+
+                for (size_t i = 0; i < camtime.second.size(); i++) {
+                    double time = camtime.second[i];
+
+                    // Skip sampled views if the feature was partially sampled
+                    if (is_partially_sampled) {
+                        const std::vector<double>& selected_views = feature_measurements_map[feat_id];
+                        if (std::find(selected_views.begin(), selected_views.end(), time) != selected_views.end()) {
+                            continue;  // Skip the selected views
+                        }
+                    }
+
+                    // Skip measurements we don't have poses for
+                    if (map_camera_times.find(time) == map_camera_times.end() || time == oldest_camera_time) {
+                        continue;  // Skip if no pose available for this time
+                    }
+
+                    // Measurement (UV coordinates)
+                    Eigen::Vector2d uv_norm;
+                    uv_norm << (double)feat->uvs_norm.at(cam_id).at(i)(0), (double)feat->uvs_norm.at(cam_id).at(i)(1);
+
+                    // // Depth retrieval (similar to previous)
+                    // double depth = -1.0;
+                    // Eigen::Vector2d uv_norm_first;
+                    // bool depth_extracted = false;
+
+                    // // Retrieve depth from the depth map using the oldest_camera_time
+                    // for (const auto &camtime_depth : feat->timestamps) {
+                    //     for (size_t j = 0; j < camtime_depth.second.size(); j++) {
+                    //         if (camtime_depth.second[j] == oldest_camera_time) {
+                    //             uv_norm_first << (double)feat->uvs_norm.at(camtime_depth.first).at(j)(0),
+                    //                             (double)feat->uvs_norm.at(camtime_depth.first).at(j)(1);
+                    //             depth = depth_map.at<double>(static_cast<int>(uv_norm_first(1)), static_cast<int>(uv_norm_first(0)));
+                    //             depth_extracted = true;
+                    //             break;
+                    //         }
+                    //     }
+                    //     if (depth_extracted) break;
+                    // }
+
+// Check if the feature exists in the map
+    auto now = feature_depth_theta_map_one_shot.find(feat_id);
+    if (now == feature_depth_theta_map_one_shot.end()) {
+        PRINT_ERROR("Error: Feature ID %zu not found in feature_depth_theta_map_one_shot\n", feat_id);
+        continue;  // Skip this feature if it's not in the map
+    }
+
+    // Access precomputed depth and bearing values
+    const auto& depth_bearing = now->second;
+    double depth = depth_bearing(0);  // Precomputed depth
+    Eigen::Vector3d theta_C0_to_fi;
+    theta_C0_to_fi << depth_bearing(1), depth_bearing(2), depth_bearing(3);  // Precomputed bearing vector
+
+    PRINT_DEBUG("[RANSAC-Simplified]: Feature ID %zu -> Depth: %.3f, Bearing: [%.3f, %.3f, %.3f]\n",
+                feat_id, depth, theta_C0_to_fi(0), theta_C0_to_fi(1), theta_C0_to_fi(2));
+
+
+                    // Construct vector Bi for depth-aided reprojection model
+                    Eigen::MatrixXd B_i(3, 2);
+                    B_i.col(0) = depth * theta_C0_to_fi;  // Depth-scaled bearing vector
+                    B_i.col(1) = theta_C0_to_fi;  // Unscaled bearing vector
+
+                    // Preintegration values (as before)
+                    double DT = 0.0;
+                    Eigen::MatrixXd R_I0toIk = Eigen::MatrixXd::Identity(3, 3);
+                    Eigen::MatrixXd alpha_I0toIk = Eigen::MatrixXd::Zero(3, 1);
+
+                    if (map_camera_cpi_I0toIi.find(time) != map_camera_cpi_I0toIi.end() && map_camera_cpi_I0toIi.at(time) != nullptr) {
+                        DT = map_camera_cpi_I0toIi.at(time)->DT;
+                        R_I0toIk = map_camera_cpi_I0toIi.at(time)->R_k2tau;
+                        alpha_I0toIk = map_camera_cpi_I0toIi.at(time)->alpha_tau;
+                    }
+
+                    // Build the linear system for reprojection error
+                    Eigen::MatrixXd H_proj = Eigen::MatrixXd::Zero(2, 3);
+                    H_proj << 1, 0, -uv_norm(0), 0, 1, -uv_norm(1);
+
+                    Eigen::MatrixXd Y = H_proj * R_ItoC * R_I0toIk;
+                    Eigen::MatrixXd H_i = Eigen::MatrixXd::Zero(2, 8);
+                    Eigen::MatrixXd b_i = Y * (alpha_I0toIk - (-R_ItoC.transpose() * p_IinC)) - H_proj * p_IinC;
+
+                    double weighting = feature_weight[feat_id];
+                    // Apply Weighting
+                    //b_i *= weighting;
+                    b_i *= std::sqrt(weighting);
+
+                    // Fill the linear system matrices
+                    if (size_feature == 1) {
+                        assert(false);  // Handle single feature case if applicable
+                    } else {
+                        H_i.block(0, 0, 2, 2) = Y * B_i;  // For depth and bearing vector
+                    }
+                    H_i.block(0, 2, 2, 3) = -DT * Y;  // For velocity
+                    H_i.block(0, 5, 2, 3) = 0.5 * DT * DT * Y;  // For gravity
+
+                    // Apply Weighting
+                    //H_i *= weighting;
+                    H_i *= std::sqrt(weighting);
+
+                    // // Append to the system
+                    // A_non_S.block(2 * idx_feat_meas_non_S, 0, 2, 8) = H_i;
+                    // b_non_S.block(2 * idx_feat_meas_non_S, 0, 2, 1) = b_i;
+
+                    // // Update feature measurement index
+                    // idx_feat_meas_non_S++;
+
+                    // Just reprojection error here and check then add in inlier set
+                    Eigen::VectorXd r = H_i * x_hat - b_i;
+                    double residual = r.norm();
+                    PRINT_DEBUG("residual : %.6f, %.6f\n", r(0), r(1));
+                    PRINT_DEBUG("norm: %.6f\n", residual);
+
+                    if(residual < gamma){
+                    // calculate tthe number of inliers
+                    inlier_count ++;
+
+                    // Check if feature is already in inlier set
+                    if (inlier_features_set.find(feat_id) == inlier_features_set.end()) {
+                        // If not already counted, add to set and increment feature inlier count
+                        inlier_features_set.insert(feat_id);
+                        feature_inlier_count++;
+                    }
+                    // Append to the system
+                    A_non_S.block(2 * idx_feat_meas_non_S, 0, 2, 8) = H_i;
+                    b_non_S.block(2 * idx_feat_meas_non_S, 0, 2, 1) = b_i;
+
+                    // Update feature measurement index
+                    idx_feat_meas_non_S++;
+
+                    }
+                }
+            }
+        }
+
+        // Step 1: Identify the rows in A_non_S that are non-zero
+        std::vector<int> non_zero_rows;
+        for (int i = 0; i < A_non_S.rows(); ++i) {
+            if (!A_non_S.row(i).isZero()) {
+                non_zero_rows.push_back(i);  // Store the index of non-zero row
+            }
+        }
+
+
+
+
+        // Step 2: Create new matrices with only the non-zero rows
+        Eigen::MatrixXd A_non_S_clean(non_zero_rows.size(), A_non_S.cols());
+        Eigen::VectorXd b_non_S_clean(non_zero_rows.size());
+
+
+        for (size_t i = 0; i < non_zero_rows.size(); ++i) {
+            A_non_S_clean.row(i) = A_non_S.row(non_zero_rows[i]);
+            b_non_S_clean(i) = b_non_S(non_zero_rows[i]);
+        }
+
+        // Print debugging information
+        PRINT_ERROR("[A_non_S_size]: Matrix A_non_S size: (%d, %d)\n", A_non_S_clean.rows(), A_non_S.cols());
+        PRINT_DEBUG("[b_non_S_size]: Vector b_non_S size: (%d, 1)\n", b_non_S_clean.rows());
+        for (int i = 0; i < A_non_S_clean.rows(); ++i) {
+            for (int j = 0; j < A_non_S_clean.cols(); ++j) {
+                //PRINT_ERROR(RED "%.6f" RESET, A_non_S_clean(i, j));
+            }
+            //PRINT_ERROR("\n");
+        }
+
+
+
+        // Solve and check if the inlier set is the best solution
+        if( inlier_count + 12 > dmin){
+        // Combine A_non_S_clean and A vertically
+        Eigen::MatrixXd A_combined(A_non_S_clean.rows() + A.rows(), A.cols());
+        A_combined.topRows(A.rows()) = A;
+        A_combined.bottomRows(A_non_S_clean.rows()) = A_non_S_clean;
+        A = A_combined;  // Overwrite A with the combined matrix
+
+        // Combine b_non_S_clean and b
+        Eigen::VectorXd b_combined(b_non_S_clean.size() + b.size());
+        b_combined.head(b.size()) = b;
+        b_combined.tail(b_non_S_clean.size()) = b_non_S_clean;
+        b = b_combined;  // Overwrite b with the combined vector
+
+        //debug inlier
+        PRINT_DEBUG("inlier_A size: (%d, %d)", A.rows(), A.cols());
+        for (int i = 0; i < A.rows(); ++i) {
+            for (int j = 0; j < A.cols(); ++j) {
+                //PRINT_ERROR("%.6f ", A(i, j));
+            }
+            //PRINT_ERROR("\n");
+        }
+
+        // Similarly, print the concatenated vector inlier_b
+        PRINT_DEBUG("inlier_b size: (%d, %d)", b.rows(), b.cols());
+        for (int i = 0; i < b.size(); ++i) {
+            //PRINT_ERROR("%.6f\n", b(i));
+        }
+
+
+        // Solve the problem
+        // ======================================================
+        // ======================================================
+
+        // Solve the linear system without constraint
+        // Eigen::MatrixXd AtA = A.transpose() * A;
+        // Eigen::MatrixXd Atb = A.transpose() * b;
+        // Eigen::MatrixXd x_hat = AtA.colPivHouseholderQr().solve(Atb);
+// for (int i = 0; i < A.rows(); ++i) {
+//     A.row(i) /=(A.row(i).norm()+b.row(i).norm());
+// }
+// for (int i = 0; i < b.rows(); ++i) {
+//     b.row(i) /= (A.row(i).norm()+b.row(i).norm());
+// }
+        // Constrained solving |g| = 9.81 constraint
+        Eigen::MatrixXd A1 = A.block(0, 0, A.rows(), A.cols() - 3);
+        // Eigen::MatrixXd A1A1_inv = (A1.transpose() * A1).inverse();
+        Eigen::MatrixXd A1A1_inv = (A1.transpose() * A1).llt().solve(Eigen::MatrixXd::Identity(A1.cols(), A1.cols()));
+        Eigen::MatrixXd A2 = A.block(0, A.cols() - 3, A.rows(), 3);
+        Eigen::MatrixXd Temp = A2.transpose() * (Eigen::MatrixXd::Identity(A1.rows(), A1.rows()) - A1 * A1A1_inv * A1.transpose());
+        Eigen::MatrixXd D = Temp * A2;
+        Eigen::MatrixXd d = Temp * b;
+        Eigen::Matrix<double, 7, 1> coeff = InitializerHelper::compute_dongsi_coeff(D, d, params.gravity_mag);
+        
+        // Create companion matrix of our polynomial
+        // https://en.wikipedia.org/wiki/Companion_matrix
+        assert(coeff(0) == 1);
+        Eigen::Matrix<double, 6, 6> companion_matrix = Eigen::Matrix<double, 6, 6>::Zero(coeff.rows() - 1, coeff.rows() - 1);
+        companion_matrix.diagonal(-1).setOnes();
+        companion_matrix.col(companion_matrix.cols() - 1) = -coeff.reverse().head(coeff.rows() - 1);
+        Eigen::JacobiSVD<Eigen::Matrix<double, 6, 6>> svd0(companion_matrix);
+        Eigen::MatrixXd singularValues0 = svd0.singularValues();
+        double cond0 = singularValues0(0) / singularValues0(singularValues0.rows() - 1);
+        PRINT_ERROR("[SOLVE Linear]:  1 \n");
+        PRINT_ERROR("[init-d]: CM cond = %.3f | rank = %d of %d (%4.3e thresh)\n", cond0, (int)svd0.rank(), (int)companion_matrix.cols(),
+                    svd0.threshold());
+        if (svd0.rank() != companion_matrix.rows()) {
+            PRINT_ERROR(RED "[init-d]: eigenvalue decomposition not full rank!!\n" RESET);
+            return false;
+        }
+
+        // Find its eigenvalues (can be complex)
+        Eigen::EigenSolver<Eigen::Matrix<double, 6, 6>> solver(companion_matrix, false);
+        if (solver.info() != Eigen::Success) {
+            PRINT_ERROR(RED "[init-d]: failed to compute the eigenvalue decomposition!!\n" RESET);
+            return false;
+        }
+
+        // Find the smallest real eigenvalue
+        // NOTE: we find the one that gives us minimal constraint cost
+        // NOTE: not sure if the best, but one that gives the correct mag should be good?
+        bool lambda_found = false;
+        double lambda_min = -1;
+        double cost_min = INFINITY;
+        Eigen::MatrixXd I_dd = Eigen::MatrixXd::Identity(D.rows(), D.rows());
+        // double g2 = params.gravity_mag * params.gravity_mag;
+        // Eigen::MatrixXd ddt = d * d.transpose();
+        for (int i = 0; i < solver.eigenvalues().size(); i++) {
+            auto val = solver.eigenvalues()(i);
+            if (val.imag() == 0) {
+            double lambda = val.real();
+            // Eigen::MatrixXd mat = (D - lambda * I_dd) * (D - lambda * I_dd) - 1 / g2 * ddt;
+            // double cost = mat.determinant();
+            Eigen::MatrixXd D_lambdaI_inv = (D - lambda * I_dd).llt().solve(I_dd);
+            Eigen::VectorXd state_grav = D_lambdaI_inv * d;
+            double cost = std::abs(state_grav.norm() - params.gravity_mag);
+            // std::cout << lambda << " - " << cost << " -> " << state_grav.transpose() << std::endl;
+            if (!lambda_found || cost < cost_min) {
+                lambda_found = true;
+                lambda_min = lambda;
+                cost_min = cost;
+            }
+            }
+        }
+        if (!lambda_found) {
+            PRINT_ERROR(RED "[init-d]: failed to find a real eigenvalue!!!\n" RESET);
+            return false;
+        }
+        PRINT_ERROR("[init-d]: smallest real eigenvalue = %.5f (cost of %f)\n", lambda_min, cost_min);
+        PRINT_ERROR("[SOLVE Linear]:  2 \n");
+        // Recover our gravity from the constraint!
+        // Eigen::MatrixXd D_lambdaI_inv = (D - lambda_min * I_dd).inverse();
+        Eigen::MatrixXd D_lambdaI_inv = (D - lambda_min * I_dd).llt().solve(I_dd);
+        Eigen::VectorXd state_grav = D_lambdaI_inv * d;
+
+        PRINT_ERROR("[SOLVE Linear]:  3 \n");
+
+
+        // Overwrite our learned view state!! [a b v g]
+        Eigen::VectorXd state_a_b_vel = -A1A1_inv * A1.transpose() * A2 * state_grav + A1A1_inv * A1.transpose() * b;
+        PRINT_ERROR("[SOLVE Linear]:  4 \n");
+        Eigen::MatrixXd x_hat = Eigen::MatrixXd::Zero(8, 1);
+        PRINT_ERROR("[SOLVE Linear]:  5 \n");
+
+        x_hat.block(0, 0, 2 + 3, 1) = state_a_b_vel;
+        x_hat.block(2 + 3, 0, 3, 1) = state_grav;
+        PRINT_ERROR("[SOLVE Linear]:  6 \n");
+        Eigen::Vector3d best_v_I0inI0 = x_hat.block(2, 0, 3, 1);
+        PRINT_INFO("[init-d]: velocity in I0 was %.3f,%.3f,%.3f and |v| = %.4f\n", v_I0inI0(0), v_I0inI0(1), v_I0inI0(2), v_I0inI0.norm());
+        PRINT_ERROR("[SOLVE Linear]:  7 \n");
+        // Check gravity magnitude to see if converged
+        Eigen::Vector3d best_gravity_inI0 = x_hat.block(5, 0, 3, 1);
+        v_I0inI0 = best_v_I0inI0;
+        gravity_inI0 = best_gravity_inI0;
+        double init_max_grav_difference = 1e-3;
+        if (std::abs(gravity_inI0.norm() - params.gravity_mag) > init_max_grav_difference) {
+            PRINT_WARNING(YELLOW "[init-d]: gravity did not converge (%.3f > %.3f)\n" RESET, std::abs(gravity_inI0.norm() - params.gravity_mag),
+                        init_max_grav_difference);
+            return false;
+        }
+        PRINT_INFO("[init-d]: gravity in I0 was %.3f,%.3f,%.3f and |g| = %.4f\n", gravity_inI0(0), gravity_inI0(1), gravity_inI0(2),
+                    gravity_inI0.norm());
+
+
+        Eigen::VectorXd current_residual_error = A * x_hat - b;
+        double current_residual_error_norm = current_residual_error.norm();
+        // Update the best solution if this one is better
+        if (current_residual_error_norm < best_reprojection_error) {
+            best_reprojection_error = current_residual_error_norm;
+            best_state = x_hat;
+
+        }
+        PRINT_DEBUG("[best_error] current best error: .%6f \n", best_reprojection_error)
+        PRINT_DEBUG("[best_errror] current best state : ")
+        for (int i = 0; i < best_state.size(); ++i) {
+        PRINT_ERROR("%.6f ", best_state(i));  // Assuming best_state is a vector
+        }
+        PRINT_ERROR("\n");
+
+
+
+
+
+
+
+
+
+    }
+  // Calculate inlier ratio p
+  double p = static_cast<double>(feature_inlier_count) / (count_valid_features);
+  // Debug: Print total number of valid timestamps
+  PRINT_ERROR(RED "[DEBUG]: Total valid camera timestamps: %zu\n" RESET, map_camera_times.size());
+  // Compute the number of RANSAC iterations needed based on p and Q
+  int K = std::log(1 - Q) / std::log(1 - std::pow(p, 4));
+
+  // Print the results for verification
+  PRINT_ERROR("[RANSAC Parameters]: Total measurements = %d, Inlier count = %d\n", count_valid_features, feature_inlier_count);
+  PRINT_ERROR("[RANSAC Parameters]: Inlier ratio p = %.4f, Required RANSAC iterations K = %d\n", p, K);
+  dynamic_iteration = K;
+  
+  
+  
+  ////////////////////////////////////////////////////////// for using dynamic ransac
+  ii++;
+  
+  
+  
   }
-  PRINT_INFO("[init-d]: gravity in I0 was %.3f,%.3f,%.3f and |g| = %.4f\n", gravity_inI0(0), gravity_inI0(1), gravity_inI0(2),
-             gravity_inI0.norm());
+
+/////////////////////////////////////////  END ransac
+
+
+
+
+
+
+
   auto rT4 = boost::posix_time::microsec_clock::local_time();
+
+
+
+
+
+
 
   // ======================================================
   // ======================================================
 
   // Extract imu state elements
   std::map<double, Eigen::VectorXd> ori_I0toIi, pos_IiinI0, vel_IiinI0;
+
   for (auto const &timepair : map_camera_times) {
 
     // Timestamp of this pose
@@ -503,11 +1698,11 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
       alpha_I0toIk = cpi->alpha_tau;
       beta_I0toIk = cpi->beta_tau;
     }
-
+    PRINT_DEBUG("[final part] DT: %.6f\n", DT);
     // Integrate to get the relative to the current timestamp
     Eigen::Vector3d p_IkinI0 = v_I0inI0 * DT - 0.5 * gravity_inI0 * DT * DT + alpha_I0toIk;
     Eigen::Vector3d v_IkinI0 = v_I0inI0 - gravity_inI0 * DT + beta_I0toIk;
-
+    PRINT_ERROR("[final part] v_IkinI0: %.6f f\n", v_IkinI0(0));
     // Record the values all transformed to the I0 frame
     ori_I0toIi.insert({time, rot_2_quat(R_I0toIk)});
     pos_IiinI0.insert({time, p_IkinI0});
@@ -517,30 +1712,73 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   // Recover the features in the first IMU frame
   count_valid_features = 0;
   std::map<size_t, Eigen::Vector3d> features_inI0;
-  for (auto const &feat : features) {
-    if (map_features_num_meas[feat.first] < min_num_meas_to_optimize)
-      continue;
-    Eigen::Vector3d p_FinI0;
-    if (size_feature == 1) {
-      assert(false);
-      // double depth = x_hat(size_feature * A_index_features.at(feat.first), 0);
-      // p_FinI0 = depth * features_bearings.at(feat.first) - R_ItoC.transpose() * p_IinC;
-    } else {
-      p_FinI0 = x_hat.block(size_feature * A_index_features.at(feat.first), 0, 3, 1);
-    }
-    bool is_behind = false;
-    for (auto const &camtime : feat.second->timestamps) {
-      size_t cam_id = camtime.first;
-      Eigen::Vector4d q_ItoC = params.camera_extrinsics.at(cam_id).block(0, 0, 4, 1);
-      Eigen::Vector3d p_IinC = params.camera_extrinsics.at(cam_id).block(4, 0, 3, 1);
-      Eigen::Vector3d p_FinC0 = quat_2_Rot(q_ItoC) * p_FinI0 + p_IinC;
-      if (p_FinC0(2) < 0) {
-        is_behind = true;
+  for (size_t feat_id : valid_feature_ids) {
+    // Find the feature by its ID in the features map
+    auto it = features.find(feat_id);  // `it` is an iterator to the key-value pair
+
+    if (it != features.end()) {
+      // Access key-value pair: `it->first` is the key, `it->second` is the shared_ptr<Feature>
+      const auto& feat = *it;
+      if (map_features_num_meas[feat.first] < min_num_meas_to_optimize)
+        continue;
+      Eigen::Vector3d p_FinI0;
+      if (size_feature == 1) {
+        assert(false);
+        // double depth = x_hat(size_feature * A_index_features.at(feat.first), 0);
+        // p_FinI0 = depth * features_bearings.at(feat.first) - R_ItoC.transpose() * p_IinC;
+      } else {
+        //p_FinI0 = x_hat.block(size_feature * A_index_features.at(feat.first), 0, 3, 1);
+        // Assuming all maps and matrices are properly defined and contain valid values
+        // Debugging params.camera_extrinsics.at(0)
+        if (params.camera_extrinsics.size() > 0) {
+            PRINT_ERROR("camera_extrinsics size: %zu", params.camera_extrinsics.size());
+        } else {
+            PRINT_ERROR("Error: camera_extrinsics is empty or does not contain index 0");
+        }
+        Eigen::Vector3d p_IinC = params.camera_extrinsics.at(0).block(4, 0, 3, 1);
+
+        // Access depth and theta values directly from feature_depth_theta_map_one_shot
+auto it = feature_depth_theta_map_one_shot.find(feat.first);
+if (it != feature_depth_theta_map_one_shot.end()) {
+    // Retrieve depth and theta values
+    Eigen::Vector4d depth_theta = it->second;
+    double depth = depth_theta(0);
+    Eigen::Vector3d theta_C0 = depth_theta.tail<3>();  // Extract θ_x, θ_y, θ_z
+    
+    PRINT_DEBUG("Feature ID %zu successfully retrieved depth %.6f and theta [%.6f, %.6f, %.6f]\n",
+                feat.first, depth, theta_C0.x(), theta_C0.y(), theta_C0.z());
+
+    // Compute p_FinI0 using the retrieved values
+    PRINT_ERROR("[final part] damn here son1: \n");
+    p_FinI0 = (best_state(0) * depth + best_state(1)) * theta_C0 + p_IinC;
+    PRINT_ERROR("[final part] damn here son 2: \n");
+
+} else {
+    PRINT_ERROR("Error: Feature ID %zu not found in feature_depth_theta_map_one_shot\n", feat.first);
+    continue;  // Skip the rest of this loop iteration
+}
+
+// Debugging final computed values
+PRINT_ERROR("[final part] damn here son3: p_FinI0 = [%.6f, %.6f, %.6f]\n",
+            p_FinI0.x(), p_FinI0.y(), p_FinI0.z());
+
       }
-    }
-    if (!is_behind) {
-      features_inI0.insert({feat.first, p_FinI0});
-      count_valid_features++;
+      bool is_behind = false;
+      for (auto const &camtime : feat.second->timestamps) {
+        size_t cam_id = camtime.first;
+        Eigen::Vector4d q_ItoC = params.camera_extrinsics.at(0).block(0, 0, 4, 1);
+        Eigen::Vector3d p_IinC = params.camera_extrinsics.at(0).block(4, 0, 3, 1);
+        Eigen::Vector3d p_FinC0 = quat_2_Rot(q_ItoC) * p_FinI0 + p_IinC;
+        PRINT_ERROR("[final part] damn ehre son 4: \n");
+        if (p_FinC0(2) < 0) {
+          is_behind = true;
+        }
+      }
+      if (!is_behind) {
+        features_inI0.insert({feat.first, p_FinI0});
+        count_valid_features++;
+      
+        }
     }
   }
   if (count_valid_features < min_valid_features) {
@@ -557,10 +1795,36 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   gravity << 0.0, 0.0, params.gravity_mag;
   std::map<double, Eigen::VectorXd> ori_GtoIi, pos_IiinG, vel_IiinG;
   std::map<size_t, Eigen::Vector3d> features_inG;
+
+
+  PRINT_INFO(RED "Lienar system Output state! \n" RESET);
+
   for (auto const &timepair : map_camera_times) {
     ori_GtoIi[timepair.first] = quat_multiply(ori_I0toIi.at(timepair.first), q_GtoI0);
     pos_IiinG[timepair.first] = R_GtoI0.transpose() * pos_IiinI0.at(timepair.first);
     vel_IiinG[timepair.first] = R_GtoI0.transpose() * vel_IiinI0.at(timepair.first);
+
+    // Timestamp from the linear system
+    double timestamp = timepair.first;
+
+    // Get quaternion (orientation) in the correct order: qx, qy, qz, qw
+    Eigen::Vector4d quat = ori_GtoIi[timepair.first];
+    double qw = quat(3);  // Quaternion w
+    double qx = quat(0);  // Quaternion x
+    double qy = quat(1);  // Quaternion y
+    double qz = quat(2);  // Quaternion z
+
+    // Get position: tx, ty, tz
+    Eigen::Vector3d position = pos_IiinG[timepair.first];
+    double tx = position(0);
+    double ty = position(1);
+    double tz = position(2);
+
+    // Print the data in the same format as traj_log.txt (without covariance)
+    PRINT_INFO("%.5f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+              timestamp, tx, ty, tz, qx, qy, qz, qw);
+
+
   }
   for (auto const &feat : features_inI0) {
     features_inG[feat.first] = R_GtoI0.transpose() * feat.second;
@@ -830,56 +2094,63 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   assert(map_calib_cam2imu.size() == map_calib_cam.size());
 
   // Then, append new feature observations factors seen from all cameras
-  for (auto const &feat : features) {
-    // Skip features that don't have enough measurements
-    if (map_features_num_meas[feat.first] < min_num_meas_to_optimize)
-      continue;
-    // Features can be removed if behind the camera!
-    if (features_inG.find(feat.first) == features_inG.end())
-      continue;
-    // Finally loop through each raw uv observation and append it as a factor
-    for (auto const &camtime : feat.second->timestamps) {
+  for (size_t feat_id : valid_feature_ids) {
+    // Find the feature by its ID in the features map
+    auto it = features.find(feat_id);  // `it` is an iterator to the key-value pair
 
-      // Get our ids and if the camera is a fisheye or not
-      size_t feat_id = feat.first;
-      size_t cam_id = camtime.first;
-      bool is_fisheye = (std::dynamic_pointer_cast<ov_core::CamEqui>(params.camera_intrinsics.at(cam_id)) != nullptr);
+    if (it != features.end()) {
+      // Access key-value pair: `it->first` is the key, `it->second` is the shared_ptr<Feature>
+      const auto& feat = *it;
+      // Skip features that don't have enough measurements
+      if (map_features_num_meas[feat.first] < min_num_meas_to_optimize)
+        continue;
+      // Features can be removed if behind the camera!
+      if (features_inG.find(feat.first) == features_inG.end())
+        continue;
+      // Finally loop through each raw uv observation and append it as a factor
+      for (auto const &camtime : feat.second->timestamps) {
 
-      // Loop through each observation
-      for (size_t i = 0; i < camtime.second.size(); i++) {
+        // Get our ids and if the camera is a fisheye or not
+        size_t feat_id = feat.first;
+        size_t cam_id = camtime.first;
+        bool is_fisheye = (std::dynamic_pointer_cast<ov_core::CamEqui>(params.camera_intrinsics.at(cam_id)) != nullptr);
 
-        // Skip measurements we don't have poses for
-        double time = feat.second->timestamps.at(cam_id).at(i);
-        if (map_camera_times.find(time) == map_camera_times.end())
-          continue;
+        // Loop through each observation
+        for (size_t i = 0; i < camtime.second.size(); i++) {
 
-        // Our measurement
-        Eigen::Vector2d uv_raw = feat.second->uvs.at(cam_id).at(i).block(0, 0, 2, 1).cast<double>();
+          // Skip measurements we don't have poses for
+          double time = feat.second->timestamps.at(cam_id).at(i);
+          if (map_camera_times.find(time) == map_camera_times.end())
+            continue;
 
-        // If we don't have the feature state we should create that parameter block
-        // The initial guess of the features are the scaled feature map from the SFM
-        if (map_features.find(feat_id) == map_features.end()) {
-          auto *var_feat = new double[3];
-          for (int j = 0; j < 3; j++) {
-            var_feat[j] = features_inG.at(feat_id)(j);
+          // Our measurement
+          Eigen::Vector2d uv_raw = feat.second->uvs.at(cam_id).at(i).block(0, 0, 2, 1).cast<double>();
+
+          // If we don't have the feature state we should create that parameter block
+          // The initial guess of the features are the scaled feature map from the SFM
+          if (map_features.find(feat_id) == map_features.end()) {
+            auto *var_feat = new double[3];
+            for (int j = 0; j < 3; j++) {
+              var_feat[j] = features_inG.at(feat_id)(j);
+            }
+            problem.AddParameterBlock(var_feat, 3);
+            map_features.insert({feat_id, (int)ceres_vars_feat.size()});
+            ceres_vars_feat.push_back(var_feat);
           }
-          problem.AddParameterBlock(var_feat, 3);
-          map_features.insert({feat_id, (int)ceres_vars_feat.size()});
-          ceres_vars_feat.push_back(var_feat);
-        }
 
-        // Then lets add the factors
-        std::vector<double *> factor_params;
-        factor_params.push_back(ceres_vars_ori.at(map_states.at(time)));
-        factor_params.push_back(ceres_vars_pos.at(map_states.at(time)));
-        factor_params.push_back(ceres_vars_feat.at(map_features.at(feat_id)));
-        factor_params.push_back(ceres_vars_calib_cam2imu_ori.at(map_calib_cam2imu.at(cam_id)));
-        factor_params.push_back(ceres_vars_calib_cam2imu_pos.at(map_calib_cam2imu.at(cam_id)));
-        factor_params.push_back(ceres_vars_calib_cam_intrinsics.at(map_calib_cam.at(cam_id)));
-        auto *factor_pinhole = new Factor_ImageReprojCalib(uv_raw, params.sigma_pix, is_fisheye);
-        // ceres::LossFunction *loss_function = nullptr;
-        ceres::LossFunction *loss_function = new ceres::CauchyLoss(1.0);
-        problem.AddResidualBlock(factor_pinhole, loss_function, factor_params);
+          // Then lets add the factors
+          std::vector<double *> factor_params;
+          factor_params.push_back(ceres_vars_ori.at(map_states.at(time)));
+          factor_params.push_back(ceres_vars_pos.at(map_states.at(time)));
+          factor_params.push_back(ceres_vars_feat.at(map_features.at(feat_id)));
+          factor_params.push_back(ceres_vars_calib_cam2imu_ori.at(map_calib_cam2imu.at(cam_id)));
+          factor_params.push_back(ceres_vars_calib_cam2imu_pos.at(map_calib_cam2imu.at(cam_id)));
+          factor_params.push_back(ceres_vars_calib_cam_intrinsics.at(map_calib_cam.at(cam_id)));
+          auto *factor_pinhole = new Factor_ImageReprojCalib(uv_raw, params.sigma_pix, is_fisheye);
+          // ceres::LossFunction *loss_function = nullptr;
+          ceres::LossFunction *loss_function = new ceres::CauchyLoss(1.0);
+          problem.AddResidualBlock(factor_pinhole, loss_function, factor_params);
+        }
       }
     }
   }
@@ -895,6 +2166,21 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   PRINT_INFO("[init-d]: %d iterations | %zu states, %zu feats (%zu valid) | %d param and %d res | cost %.4e => %.4e\n",
              (int)summary.iterations.size(), map_states.size(), map_features.size(), count_valid_features, summary.num_parameters,
              summary.num_residuals, summary.initial_cost, summary.final_cost);
+
+  // Print the MLE output states
+  PRINT_INFO(RED "MLE Output state! \n" RESET);
+
+  for (auto const &statepair : map_states) {
+    double timestamp = statepair.first;
+    double *ori = ceres_vars_ori[statepair.second];  // Quaternion orientation (w, x, y, z)
+    double *pos = ceres_vars_pos[statepair.second];  // Position (x, y, z)
+
+    // Print timestamp, orientation (w, x, y, z), and position (x, y, z)
+    // Print in the format you requested
+    PRINT_ERROR("%.5f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+                timestamp, pos[0], pos[1], pos[2], ori[0], ori[1], ori[2], ori[3]);
+}
+
   auto rT6 = boost::posix_time::microsec_clock::local_time();
 
   // Return if we have failed!
@@ -1096,12 +2382,81 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   // Debug timing information about how long it took to initialize!!
   auto rT7 = boost::posix_time::microsec_clock::local_time();
   PRINT_DEBUG("[TIME]: %.4f sec for prelim tests\n", (rT2 - rT1).total_microseconds() * 1e-6);
-  PRINT_DEBUG("[TIME]: %.4f sec for linsys setup\n", (rT3 - rT2).total_microseconds() * 1e-6);
-  PRINT_DEBUG("[TIME]: %.4f sec for linsys\n", (rT4 - rT3).total_microseconds() * 1e-6);
+  //PRINT_DEBUG("[TIME]: %.4f sec for linsys setup\n", (rT3 - rT2).total_microseconds() * 1e-6);
+  PRINT_ERROR("[TIME]: %.4f sec for linsys\n", (rT4 - rT2).total_microseconds() * 1e-6);
   PRINT_DEBUG("[TIME]: %.4f sec for ceres opt setup\n", (rT5 - rT4).total_microseconds() * 1e-6);
   PRINT_DEBUG("[TIME]: %.4f sec for ceres opt\n", (rT6 - rT5).total_microseconds() * 1e-6);
   PRINT_DEBUG("[TIME]: %.4f sec for ceres covariance\n", (rT7 - rT6).total_microseconds() * 1e-6);
   PRINT_DEBUG("[TIME]: %.4f sec total for initialization\n", (rT7 - rT1).total_microseconds() * 1e-6);
   free_state_memory();
   return true;
+}
+
+
+
+
+double DynamicInitializer::weight(const cv::Mat& laplacian_img, const cv::Mat& laplacian_depth, double u, double v) {
+  // Check if the input Laplacian maps are empty
+  if (laplacian_img.empty()) {
+      PRINT_ERROR(RED "[init-d]: Laplacian image is empty.\n" RESET);
+      return 0.0;
+  }
+  if (laplacian_depth.empty()) {
+      PRINT_ERROR(RED "[init-d]: Laplacian depth map is empty.\n" RESET);
+      return 0.0;
+  }
+
+  // Check bounds for (u, v)
+  if (u < 0 || u >= laplacian_img.cols || v < 0 || v >= laplacian_img.rows) {
+      PRINT_DEBUG(YELLOW "[weight]: Observation (u, v) is out of bounds: (%f, %f)\n" RESET, u, v);
+      return 0.0; // Return 0.0 if observation is out of bounds
+  }
+
+
+  // Check bounds and extract gradient values at (u, v)
+  if (u < 0 || u >= laplacian_img.cols || v < 0 || v >= laplacian_img.rows) {
+      PRINT_WARNING(YELLOW "[weight]: Observation (u, v) is out of bounds: (%f, %f)\n" RESET, u, v);
+      return 0.0; // Return 0.0 if observation is out of bounds
+  }
+
+
+  double image_grad = laplacian_img.at<double>(static_cast<int>(v), static_cast<int>(u));
+  double depth_grad = laplacian_depth.at<double>(static_cast<int>(v), static_cast<int>(u));
+
+  // Debug: Print gradient values at the pixel
+  PRINT_ERROR(GREEN "[weight-debug]: Image gradient at (%d, %d): %.6f\n" RESET, static_cast<int>(u), static_cast<int>(v), image_grad);
+  PRINT_ERROR(GREEN "[weight-debug]: Depth gradient at (%d, %d): %.6f\n" RESET, static_cast<int>(u), static_cast<int>(v), depth_grad);
+
+  // Compute the weight
+  const double alpha = params.alpha;
+  double min_image_grad, max_image_grad, min_depth_grad, max_depth_grad;
+
+  // Calculate min and max for the image gradient
+  cv::minMaxLoc(laplacian_img, &min_image_grad, &max_image_grad);
+  PRINT_ERROR(GREEN "[Debug]: Min image gradient: %.6f, Max image gradient: %.6f\n" RESET, min_image_grad, max_image_grad);
+
+  // Calculate min and max for the depth gradient
+  cv::minMaxLoc(laplacian_depth, &min_depth_grad, &max_depth_grad);
+  PRINT_ERROR(GREEN "[Debug]: Min depth gradient: %.6f, Max depth gradient: %.6f\n" RESET, min_depth_grad, max_depth_grad);
+
+  // Compute the maximum absolute value for normalization
+  double max_abs_image_grad = std::max(std::abs(min_image_grad), std::abs(max_image_grad));
+  double max_abs_depth_grad = std::max(std::abs(min_depth_grad), std::abs(max_depth_grad));
+
+  // Normalize the gradients
+  double normalized_image_grad = image_grad / max_abs_image_grad;
+  //double normalized_depth_grad = depth_grad / max_abs_depth_grad;
+  double normalized_depth_grad = depth_grad;
+
+  double weight = std::exp(-((alpha * std::abs(normalized_image_grad)) + std::abs(normalized_depth_grad)));
+
+
+  // Debug: Print alpha and computed weight
+  PRINT_DEBUG(GREEN "[weight-debug]: Alpha value: %.6f\n" RESET, alpha);
+  PRINT_ERROR(GREEN "[weight-debug]: Computed weight: %.6f\n" RESET, weight);
+
+  // Debug output
+  PRINT_DEBUG("[weight]: Computed weight = %.6f for timestamp %.6f, u = %.2f, v = %.2f\n", weight, u, v);
+
+  return weight;
 }
