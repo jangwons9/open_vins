@@ -383,7 +383,7 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   std::string timestamp_prefix = timestamp_str.substr(0, 15);
 
   // Construct the directory path
-  std::string depth_map_dir = "/home/jangwon/Desktop/catkin_ws/src/open_vins/ov_init/src/dynamic/depth_map/" + timestamp_prefix + ".png";
+  std::string depth_map_dir = "path/to/depth_map";
 
   // Log the constructed file path
   PRINT_DEBUG("[init-d]: Attempting to load depth map from path: %s\n", depth_map_dir.c_str());
@@ -393,8 +393,8 @@ bool DynamicInitializer::initialize(double &timestamp, Eigen::MatrixXd &covarian
   cv::Mat depth_map = cv::imread(depth_map_dir, cv::IMREAD_UNCHANGED);
 PRINT_ERROR("laplacian_imgs: Channels = {}", depth_map.channels());
   // Construct the directory path
-  std::string image_dir = "/home/jangwon/Desktop/catkin_ws/src/open_vins/ov_init/src/dynamic/image_raw/" + timestamp_prefix + ".png";
-  std::string depth_colored__dir = "/home/jangwon/Desktop/catkin_ws/src/open_vins/ov_init/src/dynamic/depth_map/" + timestamp_prefix + ".png";
+  std::string image_dir = "path/to/raw image";
+  std::string depth_colored__dir = "path/to/colored_raw_image";
 
   // Load raw image and depth map
   cv::Mat laplacian_imgs = cv::imread(image_dir, cv::IMREAD_GRAYSCALE);
